@@ -14,13 +14,13 @@
 
 ### 系统组件关系图
 
-展示各模块之间的依赖与数据流向（用 [draw.io](https://app.diagrams.net/) 打开 `docs/architecture.drawio` 可编辑）：
+展示各模块之间的依赖与数据流向：
 
 ![技术架构图](docs/architecture.png)
 
 ### 系统全流程图
 
-包含**知识入库流程**（离线/增量）和**用户提问流程**（在线/实时）两条主线（用 [draw.io](https://app.diagrams.net/) 打开 `docs/flowchart.drawio` 可编辑）：
+包含**知识入库流程**（离线/增量）和**用户提问流程**（在线/实时）两条主线：
 
 ![全流程图](docs/flowchart.png)
 
