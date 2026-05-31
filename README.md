@@ -24,7 +24,6 @@
 
 ![全流程图](docs/flowchart.png)
 
-> **提示**：如需编辑图表，可下载 `.drawio` 文件后用 [draw.io 桌面版](https://github.com/jgraph/drawio-desktop) 或 [在线版](https://app.diagrams.net/) 打开修改，导出为 PNG 后替换上述图片。
 
 ## 快速开始
 
