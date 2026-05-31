@@ -12,24 +12,19 @@
 
 ## 技术架构
 
-```
-PDF研报/年报
-    |
-    v
-[MinerU / Docling 解析] --> 结构化 JSON + Markdown
-    |
-    v
-[图片描述] --> 多模态模型生成非表格图片文字描述
-    |
-    v
-[文本分块] --> 按 Token 切分，支持表格特殊处理
-    |
-    v
-[向量化 + 索引构建] --> FAISS 向量库（增量追加）+ BM25 索引（按文件缓存）
-    |
-    v
-[问题处理] --> 公司名抽取 -> 问题重写 -> 混合检索 -> 重排序 -> LLM 生成答案
-```
+### 系统组件关系图
+
+展示各模块之间的依赖与数据流向（用 [draw.io](https://app.diagrams.net/) 打开 `docs/architecture.drawio` 可编辑）：
+
+![技术架构图](docs/architecture.png)
+
+### 系统全流程图
+
+包含**知识入库流程**（离线/增量）和**用户提问流程**（在线/实时）两条主线（用 [draw.io](https://app.diagrams.net/) 打开 `docs/flowchart.drawio` 可编辑）：
+
+![全流程图](docs/flowchart.png)
+
+> **提示**：如需编辑图表，可下载 `.drawio` 文件后用 [draw.io 桌面版](https://github.com/jgraph/drawio-desktop) 或 [在线版](https://app.diagrams.net/) 打开修改，导出为 PNG 后替换上述图片。
 
 ## 快速开始
 
@@ -136,7 +131,10 @@ RAG-zsh/
 │       └── debug_data/       # 调试中间数据
 │
 ├── tests/                    # 单元测试
-├── docs/                     # 文档
+├── docs/                     # 文档与图表
+│   ├── src_modules_overview.md  # 模块详细说明
+│   ├── architecture.drawio      # 技术架构图（draw.io 源文件）
+│   └── flowchart.drawio         # 系统全流程图（draw.io 源文件）
 └── reference/                # 参考代码
 ```
 
