@@ -7,7 +7,7 @@
 - **PDF 文档解析**：集成 MinerU（主）与 Docling 两种解析引擎，支持表格、图表、图片的结构化提取
 - **多路混合检索**：BM25 关键词检索 + FAISS 向量语义检索 + DashScope Rerank 精排
 - **LLM 智能问答**：支持 OpenAI / DashScope（通义千问）/ Gemini 等多种大模型
-- **Streamlit 可视化界面**：提供交互式 Web 问答界面
+- **React + FastAPI Web 界面**：Kimi 风格单栏布局，SSE 流式输出，思考动画 + 打字机效果
 - **灵活配置系统**：通过 RunConfig 可自由组合不同检索策略和模型
 
 ## 技术架构
@@ -38,8 +38,13 @@ cd RAG-zsh
 python -m venv venv
 venv\Scripts\Activate.ps1   # Windows (PowerShell)
 
-# 安装依赖
+# 安装 Python 依赖
 pip install -r requirements.txt
+
+# 安装前端依赖
+cd web
+npm install
+cd ..
 ```
 
 ### 配置 API Key
@@ -53,7 +58,20 @@ cp .env.example .env
 
 ### 运行方式
 
-#### 方式一：CLI 命令行
+#### 方式一：Web 界面（推荐）
+
+```bash
+# 启动后端（终端 1）
+uvicorn api.app:app --host 127.0.0.1 --port 8000
+
+# 启动前端（终端 2）
+cd web
+npm run dev
+```
+
+浏览器打开 http://127.0.0.1:5173 即可使用。
+
+#### 方式二：CLI 命令行
 
 ```bash
 # 查看所有可用命令
@@ -75,7 +93,7 @@ python main.py process-reports --config no_ser_tab
 python main.py process-questions --config hybrid_bm25_vector
 ```
 
-#### 方式二：直接运行 pipeline
+#### 方式三：直接运行 pipeline
 
 编辑 `src/pipeline.py` 底部的 `__main__` 部分，取消注释需要执行的步骤：
 
@@ -83,7 +101,7 @@ python main.py process-questions --config hybrid_bm25_vector
 python src/pipeline.py
 ```
 
-#### 方式三：Streamlit Web 界面
+#### 方式四：Streamlit 界面（旧版）
 
 ```bash
 streamlit run app_streamlit.py
@@ -93,18 +111,30 @@ streamlit run app_streamlit.py
 
 ```
 RAG-zsh/
-├── app_streamlit.py          # Streamlit Web 交互界面
-├── main.py                   # CLI 命令行入口
-├── setup.py                  # 包安装配置
-├── requirements.txt          # Python 依赖
+├── api/                       # FastAPI 后端
+│   └── app.py                 # API 路由（SSE 流式问答、文件上传、知识库状态）
 │
-├── scripts/                  # 运行脚本与部署脚本
+├── web/                       # React 前端
+│   ├── src/
+│   │   ├── App.tsx            # 主应用组件
+│   │   ├── api/index.ts       # API 调用封装
+│   │   ├── components/        # UI 组件
+│   │   └── types/index.ts     # TypeScript 类型定义
+│   ├── vite.config.ts         # Vite 配置（含代理）
+│   └── package.json
+│
+├── app_streamlit.py           # Streamlit 旧版界面（保留）
+├── main.py                    # CLI 命令行入口
+├── setup.py                   # 包安装配置
+├── requirements.txt           # Python 依赖
+│
+├── scripts/                   # 运行脚本与部署脚本
 │   ├── run_evaluation.py     # 运行评估
 │   ├── run_questions.py      # 运行问答
 │   ├── run_rebuild.py        # 重建索引
 │   └── autodl_deploy.sh      # AutoDL 部署脚本
 │
-├── src/                      # 核心源代码
+├── src/                       # 核心源代码
 │   ├── pipeline.py           # 主流程调度与配置管理
 │   ├── api_requests.py       # LLM API 统一封装（OpenAI/DashScope/Gemini）
 │   ├── api_request_parallel_processor.py  # 并发请求处理器
@@ -129,7 +159,21 @@ RAG-zsh/
 │       ├── databases/        # 检索索引（FAISS向量库/BM25，支持增量更新）
 │       └── debug_data/       # 调试中间数据
 │
-├── tests/                    # 单元测试
+├── tests/                    # 测试
+│   ├── api/                  # API 端点测试
+│   ├── chunking/             # 分块测试
+│   ├── image/                # 图片描述测试
+│   ├── pipeline/             # Pipeline 测试
+│   ├── qa/                   # 问答逻辑测试
+│   └── retrieval/            # 检索测试
+│
+├── spec/                     # 设计规范文档
+│   ├── api-spec.md           # API 契约规范
+│   ├── frontend-spec.md      # 前端交互规范
+│   ├── behavior-spec.md      # 行为规范
+│   ├── legacy-audit.md       # 遗留代码审计
+│   └── v2-spec.md            # v2 多轮对话规划
+│
 ├── docs/                     # 文档与图表
 │   ├── src_modules_overview.md  # 模块详细说明
 │   ├── architecture.drawio      # 技术架构图（draw.io 源文件）
@@ -156,13 +200,23 @@ RAG-zsh/
 
 ## 主要依赖
 
+### 后端 (Python)
+
+- `fastapi` - Web API 框架
+- `uvicorn` - ASGI 服务器
 - `faiss-cpu` - 向量相似度检索
 - `rank-bm25` - BM25 关键词检索
 - `dashscope` - 通义千问 API + Embedding + Rerank
 - `openai` - OpenAI 兼容 API
-- `streamlit` - Web 界面框架
 - `sentence-transformers` - 句子向量化
 - `PyPDF2` - PDF 处理工具
+
+### 前端 (TypeScript)
+
+- `react` - UI 框架
+- `vite` - 构建工具
+- `tailwindcss` - CSS 框架
+- `shadcn/ui` - UI 组件库
 
 ## License
 
