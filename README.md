@@ -7,7 +7,7 @@
 - **PDF 文档解析**：集成 MinerU（主）与 Docling 两种解析引擎，支持表格、图表、图片的结构化提取
 - **多路混合检索**：BM25 关键词检索 + FAISS 向量语义检索 + DashScope Rerank 精排
 - **LLM 智能问答**：支持 OpenAI / DashScope（通义千问）/ Gemini 等多种大模型
-- **React + FastAPI Web 界面**：Kimi 风格单栏布局，SSE 流式输出，思考动画 + 打字机效果
+- **React + FastAPI Web 界面**：居中单栏对话布局，SSE 流式输出，思考动画 + 打字机效果
 - **灵活配置系统**：通过 RunConfig 可自由组合不同检索策略和模型
 
 ## 技术架构
