@@ -146,3 +146,15 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# ========== 前端构建产物 ==========
+web/node_modules/
+web/dist/
+web/.vite/
+
+# ========== 大文件 / 向量数据库 ==========
+*.faiss
+*.pkl
+
+# ========== 测试临时文件 ==========
+test_sse_proxy.py
