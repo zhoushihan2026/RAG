@@ -395,7 +395,7 @@ class BaseGeminiProcessor:
 
 
 class APIProcessor:
-    def __init__(self, provider: Literal["openai", "ibm", "gemini", "dashscope"] ="dashscope"):
+    def __init__(self, provider: Literal["openai", "ibm", "gemini", "dashscope", "fe8"] ="dashscope"):
         self.provider = provider.lower()
         if self.provider == "openai":
             self.processor = BaseOpenaiProcessor()
@@ -405,6 +405,8 @@ class APIProcessor:
             self.processor = BaseGeminiProcessor()
         elif self.provider == "dashscope":
             self.processor = BaseDashscopeProcessor()
+        elif self.provider == "fe8":
+            self.processor = Fe8Processor()
 
     def send_message(
         self,
@@ -712,6 +714,7 @@ class AsyncOpenaiProcessor:
 class BaseDashscopeProcessor:
     # 需要使用OpenAI兼容接口的多模态模型列表
     MULTIMODAL_MODELS = {
+        "qwen3.7-plus", "qwen3.7-plus-2026-06-01",
         "qwen3.6-plus", "qwen3.6-plus-2026-04-02",
         "qwen3.6-max-preview", "qwen3.6-flash", "qwen3.6-flash-2026-04-16",
         "qwen3.5-plus", "qwen3.5-plus-2026-02-15",
@@ -896,7 +899,7 @@ class BaseDashscopeProcessor:
             return {"final_answer": content, "step_by_step_analysis": "", "reasoning_summary": "", "relevant_pages": []}
 
     def _send_message_openai_compat(self, model, messages, temperature):
-        """通过DashScope OpenAI兼容接口发送消息（用于多模态模型如qwen3.6-plus）"""
+        """通过DashScope OpenAI兼容接口发送消息（用于多模态模型如qwen3.7-plus）"""
         client = self._get_openai_client()
         try:
             completion = client.chat.completions.create(
@@ -937,18 +940,24 @@ class BaseDashscopeProcessor:
 
     def send_message_stream(self, model="qwen-turbo-latest", temperature=0.1,
                             system_content='You are a helpful assistant.',
-                            human_content='Hello!', **kwargs):
+                            human_content='Hello!',
+                            messages=None,
+                            **kwargs):
         """
         流式发送消息到DashScope，yield每个token片段。
         返回生成器，调用方可逐token获取内容。
+        v2: 支持传入完整 messages 数组（用于多轮对话）
         """
         if model is None:
             model = self.default_model
-        messages = []
-        if system_content:
-            messages.append({"role": "system", "content": system_content})
-        if human_content:
-            messages.append({"role": "user", "content": human_content})
+
+        # v2: 如果传入 messages，直接使用；否则从 system_content + human_content 构造
+        if messages is None:
+            messages = []
+            if system_content:
+                messages.append({"role": "system", "content": system_content})
+            if human_content:
+                messages.append({"role": "user", "content": human_content})
 
         if self._is_multimodal_model(model):
             yield from self._send_message_stream_openai_compat(model, messages, temperature)
@@ -999,4 +1008,120 @@ class BaseDashscopeProcessor:
         except Exception as e:
             error_msg = f"[OpenAI兼容流式错误] {e}"
             print(error_msg)
+            yield error_msg
+
+
+# ========== fe8.cn OpenAI兼容处理器 ==========
+# 通过 fe8.cn 中转调用 OpenAI 系列模型（gpt-4-turbo、gpt-3.5-turbo 等）
+# API Key 通过环境变量 FE8_API_KEY 配置
+
+class Fe8Processor:
+    """基于 fe8.cn OpenAI兼容接口的处理器，支持同步/流式调用"""
+
+    BASE_URL = "https://api.fe8.cn/v1"
+
+    def __init__(self):
+        self.api_key = os.getenv("FE8_API_KEY", "")
+        self._client = None
+        self.default_model = "gpt-3.5-turbo"
+        self._stream_full_content = ""
+
+    def _get_client(self):
+        """获取 fe8.cn OpenAI 兼容客户端"""
+        if self._client is None:
+            if not self.api_key:
+                raise ValueError("FE8_API_KEY 环境变量未设置，请在 .env 文件中配置")
+            self._client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.BASE_URL
+            )
+        return self._client
+
+    def send_message(
+        self,
+        model="gpt-3.5-turbo",
+        temperature=0.1,
+        seed=None,
+        system_content='You are a helpful assistant.',
+        human_content='Hello!',
+        is_structured=False,
+        response_format=None,
+        **kwargs
+    ):
+        """同步发送消息，返回模型响应内容"""
+        client = self._get_client()
+        messages = []
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
+        if human_content:
+            messages.append({"role": "user", "content": human_content})
+
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = completion.choices[0].message.content
+            self.response_data = {
+                "model": model,
+                "input_tokens": completion.usage.prompt_tokens if completion.usage else None,
+                "output_tokens": completion.usage.completion_tokens if completion.usage else None
+            }
+
+            # 尝试解析 JSON 响应
+            try:
+                content_str = content.strip()
+                if content_str.startswith('```'):
+                    import re
+                    content_str = re.sub(r'^```\w*\n?', '', content_str)
+                    content_str = re.sub(r'\n?```$', '', content_str)
+                parsed_content = json.loads(content_str)
+                return parsed_content
+            except (json.JSONDecodeError, TypeError):
+                return content
+        except Exception as e:
+            print(f"[fe8.cn] 调用失败: {e}")
+            raise
+
+    def send_message_stream(self, model="gpt-3.5-turbo", temperature=0.1,
+                            system_content='You are a helpful assistant.',
+                            human_content='Hello!',
+                            messages=None,
+                            **kwargs):
+        """
+        流式发送消息，yield每个token片段。
+        接口与 BaseDashscopeProcessor.send_message_stream 兼容。
+        """
+        client = self._get_client()
+
+        if model is None:
+            model = "gpt-3.5-turbo"
+
+        # 如果传入 messages，直接使用；否则从 system_content + human_content 构造
+        if messages is None:
+            messages = []
+            if system_content:
+                messages.append({"role": "system", "content": system_content})
+            if human_content:
+                messages.append({"role": "user", "content": human_content})
+
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                stream=True,
+            )
+            full_content = ""
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    full_content += delta
+                    yield delta
+            self._stream_full_content = full_content
+        except Exception as e:
+            error_msg = f"[fe8.cn流式错误] {e}"
+            print(error_msg)
+            self._stream_full_content = full_content if 'full_content' in dir() else ""
             yield error_msg

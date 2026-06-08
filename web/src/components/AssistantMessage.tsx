@@ -14,11 +14,12 @@ export function AssistantMessage({ message }: AssistantMessageProps) {
     details,
     thinkingSteps = [],
     thinkingCollapsed = false,
+    skipAnimation = false,
   } = message;
   const [showReasoning, setShowReasoning] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
-  // v3.1: 打字机完成后才展示推理/参考来源
-  const [typewriterDone, setTypewriterDone] = useState(false);
+  // v3.1: 打字机完成后才展示推理/参考来源；缓存恢复的消息直接展示
+  const [typewriterDone, setTypewriterDone] = useState(skipAnimation);
 
   // 判断是否为错误消息（无 details 且内容短）
   const isError = !isStreaming && !details && content.length < 100;
@@ -53,6 +54,7 @@ export function AssistantMessage({ message }: AssistantMessageProps) {
               <TypewriterText
                 text={content}
                 speed={15}
+                skipAnimation={skipAnimation}
                 onComplete={() => setTypewriterDone(true)}
               />
             </div>

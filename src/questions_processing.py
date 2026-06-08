@@ -156,6 +156,178 @@ def build_metadata_filters(question_text: str, companies_df: pd.DataFrame,
     return rewritten_query, filters
 
 
+# ========== 多轮对话相关工具函数 ==========
+
+
+def extract_company_from_history(history_messages: list[dict], companies_df) -> str | None:
+    """
+    从历史消息中提取公司名称。
+    当当前问题中无法提取到公司名时，回退到历史消息中查找。
+
+    参数：
+        history_messages: 对话历史消息列表
+        companies_df: subset.csv 的 DataFrame，包含 company_name 列
+    返回：
+        找到的公司名，或 None
+    """
+    if not history_messages or companies_df is None:
+        return None
+
+    company_names = sorted(companies_df['company_name'].unique(), key=len, reverse=True)
+    # 已知券商名，排除干扰
+    KNOWN_BROKERS = ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]
+
+    # 遍历历史中的用户消息（从最近到最早），找到第一个包含公司名的
+    user_msgs = [m for m in history_messages if m["role"] == "user"]
+    for msg in reversed(user_msgs):
+        clean_text = msg["content"]
+        for broker in sorted(KNOWN_BROKERS, key=len, reverse=True):
+            clean_text = clean_text.replace(broker, '')
+        for company in company_names:
+            if company in clean_text:
+                return company
+    return None
+
+# 中文停用词集合，用于追问关键词扩展时过滤无意义词
+FOLLOWUP_STOPWORDS = {
+    "是", "多少", "有", "了", "在", "和", "与", "或", "及", "等", "中", "为",
+    "到", "从", "被", "把", "让", "向", "对", "这", "那", "一", "个", "不",
+    "也", "都", "还", "又", "就", "才", "已", "所", "其", "之", "而", "则",
+    "且", "但", "如", "若", "因", "故", "会", "能", "可", "要", "将", "上",
+    "下", "里", "外", "前", "后", "时", "年", "月", "日",
+}
+
+
+def expand_followup_query(rewritten_query: str, history_messages: list[dict]) -> str:
+    """
+    追问场景：将前一轮用户问题的核心词合并到检索查询中，扩大召回范围。
+    解决追问"同比下降的原因"时检索不到相关文档的问题。
+
+    参数：
+        rewritten_query: 当前重写后的检索查询
+        history_messages: 对话历史消息列表
+    返回：
+        扩展后的检索查询
+    """
+    import re
+
+    if not history_messages:
+        return rewritten_query
+
+    prev_user_msgs = [m for m in history_messages if m["role"] == "user"]
+    if not prev_user_msgs:
+        return rewritten_query
+
+    prev_question = prev_user_msgs[-1]["content"]
+
+    # 从前一轮问题中提取有意义的中文词组
+    # 使用常见财务/业务指标词表匹配，避免滑动窗口产生碎片
+    FINANCIAL_TERMS = {
+        "营业收入", "营收", "收入", "净利润", "利润", "毛利率", "净利率",
+        "研发费用", "研发投入", "营业成本", "成本", "现金流", "资产负债",
+        "产能利用率", "产能", "产量", "销量", "出货量", "产能扩张",
+        "折旧", "摊销", "减值", "资产减值", "投资收益",
+        "目标价", "评级", "盈利预测", "估值",
+        "同比增长", "同比", "环比增长", "环比", "增长", "下降",
+        "占比", "比重", "份额", "比例",
+        "原因", "因素", "驱动", "影响",
+    }
+
+    prev_tokens = set()
+    # 1. 匹配已知财务术语（优先长词，避免短词覆盖长词）
+    for term in sorted(FINANCIAL_TERMS, key=len, reverse=True):
+        if term in prev_question:
+            prev_tokens.add(term)
+
+    # 2. 提取数字+单位组合（如"2024年"、"578亿元"）
+    for m in re.finditer(r'\d+[年月日季度%％亿元万美元港元]', prev_question):
+        prev_tokens.add(m.group())
+
+    # 当前 rewritten_query 中已有的词
+    curr_tokens = set(rewritten_query.split())
+    # 从 rewritten_query 中也提取中文片段做匹配
+    for seg in re.findall(r'[\u4e00-\u9fff]+', rewritten_query):
+        for length in (2, 3, 4):
+            for i in range(len(seg) - length + 1):
+                curr_tokens.add(seg[i:i+length])
+
+    extra_words = prev_tokens - curr_tokens
+    # 过滤停用词
+    extra_words = {w for w in extra_words if w not in FOLLOWUP_STOPWORDS}
+    if extra_words:
+        rewritten_query = rewritten_query + " " + " ".join(sorted(extra_words))
+        print(f"[追问扩展] 合并前一轮关键词: {extra_words}")
+
+    return rewritten_query
+
+
+def summarize_history_for_rewrite(history_messages: list[dict], max_rounds: int = 3) -> str:
+    """
+    将历史消息格式化为问题重写用的摘要。
+    只取最近 max_rounds 轮（1轮 = 1个user + 1个assistant）。
+    assistant 内容截取前 100 字。
+
+    参数：
+        history_messages: 对话历史消息列表
+        max_rounds: 保留的最大轮数
+    返回：
+        格式化的历史摘要文本
+    """
+    recent = history_messages[-(max_rounds * 2):]
+    lines = []
+    for msg in recent:
+        role_label = "用户" if msg["role"] == "user" else "助手"
+        content = msg["content"]
+        if role_label == "助手" and len(content) > 100:
+            content = content[:100] + "..."
+        lines.append(f"{role_label}: {content}")
+    return "\n".join(lines)
+
+
+def parse_llm_json_response(response) -> dict:
+    """
+    解析 LLM 返回的 JSON 响应。
+    支持纯 JSON 字符串和被 ``` 包裹的代码块格式。
+
+    参数：
+        response: LLM 返回的响应（str 或 dict）
+    返回：
+        解析后的字典，解析失败返回空字典
+    """
+    import json as _json
+
+    if isinstance(response, dict):
+        return response
+
+    if isinstance(response, str):
+        try:
+            resp_str = response.strip()
+            if resp_str.startswith("```"):
+                resp_str = re.sub(r'^```\w*\n?', '', resp_str)
+                resp_str = re.sub(r'\n?```$', '', resp_str)
+            return _json.loads(resp_str)
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    return {}
+
+
+def parse_classify_result(response) -> str:
+    """
+    解析问题分类结果。
+
+    参数：
+        response: LLM 返回的分类响应
+    返回：
+        分类字符串：fact_extraction / analysis_explanation / prediction_judgment / string
+    """
+    result = parse_llm_json_response(response)
+    category = result.get("category", "string") if isinstance(result, dict) else "string"
+    if category not in ("fact_extraction", "analysis_explanation", "prediction_judgment"):
+        category = "string"
+    return category
+
+
 class QuestionsProcessor:
     def __init__(
         self,
@@ -177,6 +349,7 @@ class QuestionsProcessor:
         parallel_requests: int = 10,
         api_provider: str = "dashscope",
         answering_model: str = "deepseek-v4-pro",
+        rewrite_model: str = "qwen-turbo",
         full_context: bool = False,
         metadata_path: Optional[Union[str, Path]] = None,
         use_metadata_filter: bool = False
@@ -199,6 +372,7 @@ class QuestionsProcessor:
         self.bm25_db_dir = Path(bm25_db_dir) if bm25_db_dir else None
         self.top_n_retrieval = top_n_retrieval
         self.answering_model = answering_model
+        self.rewrite_model = rewrite_model
         self.parallel_requests = parallel_requests
         self.api_provider = api_provider
         self.openai_processor = APIProcessor(provider=api_provider)
@@ -387,12 +561,12 @@ class QuestionsProcessor:
         return answer_dict
 
     def _rewrite_question(self, question: str) -> dict:
-        """调用LLM重写问题：关键词扩展 + 文档类型推断。使用qwen-turbo加速"""
+        """调用LLM重写问题：关键词扩展 + 文档类型推断。使用rewrite_model加速"""
         system_prompt = prompts.QUESTION_REWRITE_SYSTEM_PROMPT
         user_prompt = f"请分析以下问题：\n{question}"
         try:
             result = self.openai_processor.send_message(
-                model="qwen-turbo",
+                model=self.rewrite_model,
                 system_content=system_prompt,
                 human_content=user_prompt,
                 is_structured=False
@@ -412,7 +586,7 @@ class QuestionsProcessor:
         """调用LLM分类问题类型，返回 fact_extraction/analysis_explanation/prediction_judgment/string"""
         try:
             result = self.openai_processor.send_message(
-                model="qwen-turbo",
+                model=self.rewrite_model,
                 system_content=prompts.QUESTION_CLASSIFICATION_SYSTEM_PROMPT,
                 human_content=f"请分类以下问题：\n{question}",
                 is_structured=False

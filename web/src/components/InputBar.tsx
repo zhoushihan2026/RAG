@@ -202,7 +202,7 @@ export function InputBar({ onSubmit, isGenerating }: InputBarProps) {
 
         {/* 底部提示 */}
         <p className="text-center text-[11px] text-[#CBD5E1] mt-2">
-          基于 RAG 知识库回答，每次提问独立，不保留上下文
+          基于 RAG 知识库回答，支持多轮对话追问
         </p>
       </div>
     </div>

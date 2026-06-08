@@ -5,6 +5,7 @@ FastAPI 应用主模块
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.pipeline import Pipeline, hybrid_bm25_vector_config
+from src.session_manager import SessionManager
 
 
 # ============================================================
@@ -23,7 +25,12 @@ from src.pipeline import Pipeline, hybrid_bm25_vector_config
 class ChatRequest(BaseModel):
     """问答请求"""
     question: str = Field(..., min_length=1, description="用户问题")
-    session_id: Optional[str] = Field(None, description="会话ID，v1 忽略")
+    session_id: Optional[str] = Field(None, description="会话ID")
+
+
+class RenameSessionRequest(BaseModel):
+    """重命名会话请求"""
+    title: str = Field(..., min_length=1, description="新标题")
 
 
 class UploadResponse(BaseModel):
@@ -65,13 +72,15 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
             "http://localhost:5178",
             "http://127.0.0.1:5178",
             "http://localhost:5180",
             "http://127.0.0.1:5180",
         ],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PATCH"],
         allow_headers=["Content-Type"],
     )
 
@@ -83,9 +92,28 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
     # 将 pipeline 存储在 app.state 中
     app.state.pipeline = pipeline
 
+    # v2: 初始化 SessionManager
+    app.state.session_manager = SessionManager()
+
+    # 全局异常处理器：确保所有错误都返回 JSON 而非 500 HTML
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request, exc):
+        import traceback
+        traceback.print_exc()
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"服务器内部错误: {str(exc)}"},
+        )
+
     # ============================================================
     # 路由
     # ============================================================
+
+    @app.get("/")
+    async def root():
+        """根路径，返回 API 基本信息"""
+        return {"status": "ok", "message": "RAG Knowledge Base API", "docs": "/docs"}
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health_check():
@@ -97,16 +125,45 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
         """
         流式问答接口
         返回 SSE 事件流
+        v2: 支持 session_id，自动管理对话历史
         """
         pipeline = app.state.pipeline
+        session_manager = app.state.session_manager
+
+        # v2: session_id 处理
+        session_id = request.session_id
+        if not session_id:
+            session_id = str(uuid.uuid4())
+
+        # v2: 检查会话是否达到上限
+        session = session_manager.get_or_create(session_id)
+        if session.count_user_messages() >= session_manager.max_user_messages:
+            def error_generator():
+                yield f"event: error\ndata: {json.dumps({'error': '此对话已达上限（50条），请新建对话'}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(error_generator(), media_type="text/event-stream")
+
+        # v2: 获取历史消息
+        history_messages = session_manager.get_history_messages(session_id)
+
+        # v2: 保存用户问题到会话
+        session_manager.add_message(session_id, "user", request.question)
 
         def event_generator():
+            final_answer = ""
             try:
                 for event in pipeline.answer_single_question_stream(
-                    request.question, kind="string"
+                    request.question, kind="string",
+                    history_messages=history_messages,
                 ):
                     event_type = event.get("type", "status")
                     event_content = event.get("content", "")
+
+                    # 收集最终答案（用于保存到会话）
+                    if event_type == "done" and isinstance(event_content, dict):
+                        final_answer = event_content.get("final_answer", "")
+                        # 回退：如果 final_answer 为空，使用 step_by_step_analysis
+                        if not final_answer:
+                            final_answer = event_content.get("step_by_step_analysis", "")
 
                     if event_type == "done":
                         # done 事件的 content 是 dict，序列化为 JSON
@@ -123,6 +180,13 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
             except Exception as e:
                 error_event = f"event: error\ndata: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
                 yield error_event
+            finally:
+                # v2: 保存助手回答到会话
+                session_manager.add_message(
+                    session_id, "assistant",
+                    final_answer or "回答生成失败",
+                    metadata={"company_name": "", "question_category": ""}
+                )
 
         return StreamingResponse(
             event_generator(),
@@ -184,6 +248,42 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
         ]
 
         return KBStatusResponse(total_files=len(files), files=files)
+
+    # ============================================================
+    # v2: 会话管理路由
+    # ============================================================
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        """获取会话列表"""
+        return {"sessions": app.state.session_manager.list_sessions()}
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_session(session_id: str):
+        """获取会话详情"""
+        detail = app.state.session_manager.get_session_detail(session_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return detail
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        """删除会话"""
+        app.state.session_manager.delete_session(session_id)
+        return {"status": "deleted"}
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(session_id: str, request: RenameSessionRequest):
+        """重命名会话"""
+        session = app.state.session_manager.sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        app.state.session_manager.rename_session(session_id, request.title)
+        return {
+            "id": session_id,
+            "title": request.title,
+            "updated_at": session.updated_at.isoformat() + "Z",
+        }
 
     return app
 

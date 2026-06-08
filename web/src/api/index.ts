@@ -1,16 +1,18 @@
-import type { SSEEvent, UploadResponse, KBStatus } from "@/types";
+import type { SSEEvent, UploadResponse, KBStatus, SessionSummary, SessionDetail } from "@/types";
 
 const API_BASE = "/api";
 
 // 发送问答请求，返回 SSE 事件流
+// v2: 新增 sessionId 参数
 export async function sendQuestion(
   question: string,
+  sessionId: string,
   onEvent: (event: SSEEvent) => void,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, session_id: sessionId }),
   });
 
   if (!response.ok) {
@@ -116,4 +118,44 @@ export async function getKBStatus(): Promise<KBStatus> {
   }
 
   return response.json();
+}
+
+// v2 新增: 获取会话列表
+export async function getSessions(): Promise<{ sessions: SessionSummary[] }> {
+  const response = await fetch(`${API_BASE}/sessions`);
+  if (!response.ok) {
+    throw new Error("获取会话列表失败");
+  }
+  return response.json();
+}
+
+// v2 新增: 获取会话详情
+export async function getSession(id: string): Promise<SessionDetail> {
+  const response = await fetch(`${API_BASE}/sessions/${id}`);
+  if (!response.ok) {
+    throw new Error("获取会话详情失败");
+  }
+  return response.json();
+}
+
+// v2 新增: 删除会话
+export async function deleteSession(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${id}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error("删除会话失败");
+  }
+}
+
+// v2 新增: 重命名会话
+export async function renameSession(id: string, title: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("重命名会话失败");
+  }
 }

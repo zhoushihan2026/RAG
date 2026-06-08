@@ -18,7 +18,7 @@ from src.parsed_reports_merging import PageTextPreparation
 from src.text_splitter_z import TextSplitter
 from src.ingestion import VectorDBIngestor
 from src.ingestion import BM25Ingestor
-from src.questions_processing import QuestionsProcessor
+from src.questions_processing import QuestionsProcessor, build_metadata_filters, summarize_history_for_rewrite, parse_llm_json_response, parse_classify_result, extract_company_from_history, expand_followup_query
 from src import prompts
 from src.tables_serialization import TableSerializer
 from src.image_description import process_report_images, process_all_reports_images
@@ -68,9 +68,9 @@ class RunConfig:
     pipeline_details: str = ""                   # 流程描述信息，写入答案文件用于区分不同配置
     submission_file: bool = True                 # 是否生成提交格式的答案文件
     full_context: bool = False                   # 是否使用全量上下文（跳过检索，直接返回整篇报告）
-    api_provider: str = "dashscope"              # API提供商：dashscope 或 openai
-    answering_model: str = "qwen3.6-max-preview"   # 回答模型：qwen-turbo-latest / qwen3.6-max-preview / gpt-4o-mini-2024-07-18 / gpt-4o-2024-08-06
-    rewrite_model: str = "qwen-turbo"            # 重写/分类模型（轻量快速）
+    api_provider: str = "fe8"                    # API提供商：dashscope / fe8
+    answering_model: str = "gpt-4-turbo"          # 回答模型：gpt-4-turbo（fe8）/ qwen3.7-plus（dashscope）
+    rewrite_model: str = "gpt-3.5-turbo"          # 重写/分类模型：gpt-3.5-turbo（fe8）/ qwen-turbo（dashscope）
     config_suffix: str = ""                      # 配置后缀，用于区分不同实验的输出文件名
     use_metadata_filter: bool = False            # 是否启用元数据过滤检索（统一向量库+元数据过滤+问题重写）
 
@@ -1001,77 +1001,65 @@ class Pipeline:
             parallel_requests=1,
             api_provider=self.run_config.api_provider,
             answering_model=answering_model or self.run_config.answering_model,
+            rewrite_model=self.run_config.rewrite_model,
             full_context=self.run_config.full_context,
             metadata_path=self.paths.metadata_path,
             use_metadata_filter=self.run_config.use_metadata_filter
         )
 
+    def _get_llm_processor(self):
+        """根据api_provider配置返回对应的LLM处理器"""
+        if self.run_config.api_provider == "fe8":
+            from src.api_requests import Fe8Processor
+            return Fe8Processor()
+        else:
+            from src.api_requests import BaseDashscopeProcessor
+            return BaseDashscopeProcessor()
+
     def _classify_question(self, question):
         """对问题进行分类，返回类别字符串"""
-        import json as _json
-        import re
-        from src.api_requests import BaseDashscopeProcessor
-        classify_processor = BaseDashscopeProcessor()
+        classify_processor = self._get_llm_processor()
         classify_resp = classify_processor.send_message(
             model=self.run_config.rewrite_model,
             system_content=prompts.QUESTION_CLASSIFICATION_SYSTEM_PROMPT,
             human_content=f"请分类以下问题：\n{question}",
             is_structured=False
         )
-        question_category = "string"
-        if isinstance(classify_resp, str):
-            try:
-                resp_str = classify_resp.strip()
-                if resp_str.startswith("```"):
-                    resp_str = re.sub(r'^```\w*\n?', '', resp_str)
-                    resp_str = re.sub(r'\n?```$', '', resp_str)
-                classify_result = _json.loads(resp_str)
-                question_category = classify_result.get("category", "string")
-            except (_json.JSONDecodeError, TypeError):
-                question_category = "string"
-        elif isinstance(classify_resp, dict):
-            question_category = classify_resp.get("category", "string")
-        if question_category not in ("fact_extraction", "analysis_explanation", "prediction_judgment"):
-            question_category = "string"
+        question_category = parse_classify_result(classify_resp)
         print(f"[计时] 问题分类({self.run_config.rewrite_model}): 类别={question_category}")
         return question_category
 
     def _rewrite_question(self, question):
         """对问题进行重写，返回重写结果字典"""
-        import json as _json
-        import re
-        from src.api_requests import BaseDashscopeProcessor
-        rewrite_processor = BaseDashscopeProcessor()
+        rewrite_processor = self._get_llm_processor()
         rewrite_resp = rewrite_processor.send_message(
             model=self.run_config.rewrite_model,
             system_content=prompts.QUESTION_REWRITE_SYSTEM_PROMPT,
             human_content=f"请分析以下问题：\n{question}",
             is_structured=False
         )
-        rewrite_result = {}
-        if isinstance(rewrite_resp, str):
-            try:
-                resp_str = rewrite_resp.strip()
-                if resp_str.startswith("```"):
-                    resp_str = re.sub(r'^```\w*\n?', '', resp_str)
-                    resp_str = re.sub(r'\n?```$', '', resp_str)
-                rewrite_result = _json.loads(resp_str)
-            except (_json.JSONDecodeError, TypeError):
-                rewrite_result = {}
-        elif isinstance(rewrite_resp, dict):
-            rewrite_result = rewrite_resp
+        rewrite_result = parse_llm_json_response(rewrite_resp)
         print(f"[计时] 问题重写({self.run_config.rewrite_model}): 结果: {rewrite_result}")
         return rewrite_result
 
-    def _rewrite_and_classify_parallel(self, question):
-        """并行执行问题重写和分类，使用asyncio.to_thread包装同步调用实现并发"""
+    def _rewrite_and_classify_parallel(self, question, history_messages=None):
+        """并行执行问题重写和分类，使用asyncio.to_thread包装同步调用实现并发
+        v2: 支持传入历史消息，在问题重写时考虑上下文
+        """
         import asyncio
-        import json as _json
-        import re
-        from src.api_requests import BaseDashscopeProcessor
 
-        classify_processor = BaseDashscopeProcessor()
-        rewrite_processor = BaseDashscopeProcessor()
+        classify_processor = self._get_llm_processor()
+        rewrite_processor = self._get_llm_processor()
+
+        # v2: 根据是否有历史消息，构造不同的重写 human_content
+        if history_messages:
+            history_summary = summarize_history_for_rewrite(history_messages)
+            rewrite_human_content = prompts.HISTORY_REWRITE_HUMAN_TEMPLATE.format(
+                history_summary=history_summary,
+                question=question,
+            )
+        else:
+            rewrite_human_content = f"请分析以下问题：\n{question}"
 
         async def _run_parallel():
             classify_task = asyncio.to_thread(
@@ -1081,11 +1069,13 @@ class Pipeline:
                 human_content=f"请分类以下问题：\n{question}",
                 is_structured=False
             )
+            # 有历史时使用专用的重写提示词，无历史时使用通用重写提示词
+            rewrite_system = prompts.HISTORY_REWRITE_SYSTEM_PROMPT if history_messages else prompts.QUESTION_REWRITE_SYSTEM_PROMPT
             rewrite_task = asyncio.to_thread(
                 rewrite_processor.send_message,
                 model=self.run_config.rewrite_model,
-                system_content=prompts.QUESTION_REWRITE_SYSTEM_PROMPT,
-                human_content=f"请分析以下问题：\n{question}",
+                system_content=rewrite_system,
+                human_content=rewrite_human_content,
                 is_structured=False
             )
             classify_resp, rewrite_resp = await asyncio.gather(classify_task, rewrite_task)
@@ -1096,36 +1086,11 @@ class Pipeline:
         print(f"[计时] 并行重写+分类总耗时: {time.time()-t_start:.2f}s")
 
         # 解析分类结果
-        question_category = "string"
-        if isinstance(classify_resp, dict):
-            question_category = classify_resp.get("category", "string")
-        elif isinstance(classify_resp, str):
-            try:
-                resp_str = classify_resp.strip()
-                if resp_str.startswith("```"):
-                    resp_str = re.sub(r'^```\w*\n?', '', resp_str)
-                    resp_str = re.sub(r'\n?```$', '', resp_str)
-                classify_result = _json.loads(resp_str)
-                question_category = classify_result.get("category", "string")
-            except (_json.JSONDecodeError, TypeError):
-                question_category = "string"
-        if question_category not in ("fact_extraction", "analysis_explanation", "prediction_judgment"):
-            question_category = "string"
+        question_category = parse_classify_result(classify_resp)
         print(f"[计时] 问题分类({self.run_config.rewrite_model}): 类别={question_category}")
 
         # 解析重写结果
-        rewrite_result = {}
-        if isinstance(rewrite_resp, dict):
-            rewrite_result = rewrite_resp
-        elif isinstance(rewrite_resp, str):
-            try:
-                resp_str = rewrite_resp.strip()
-                if resp_str.startswith("```"):
-                    resp_str = re.sub(r'^```\w*\n?', '', resp_str)
-                    resp_str = re.sub(r'\n?```$', '', resp_str)
-                rewrite_result = _json.loads(resp_str)
-            except (_json.JSONDecodeError, TypeError):
-                rewrite_result = {}
+        rewrite_result = parse_llm_json_response(rewrite_resp)
         print(f"[计时] 问题重写({self.run_config.rewrite_model}): 结果: {rewrite_result}")
 
         return rewrite_result, question_category
@@ -1152,16 +1117,14 @@ class Pipeline:
                     print(f"读取文件失败 {json_file.name}: {e}")
         return source_files
 
-    def answer_single_question_stream(self, question: str, kind: str = "string"):
+    def answer_single_question_stream(self, question: str, kind: str = "string",
+                                       history_messages: list[dict] | None = None):
         """
         流式单条问题推理。
         模型配置通过 RunConfig 管理，不再硬编码。
         """
         import json as _json
-        import re
         import pandas as pd
-        from src.questions_processing import build_metadata_filters
-        from src.api_requests import BaseDashscopeProcessor
         from src.retrieval import MetadataFilteredRetriever
 
         t0 = time.time()
@@ -1170,22 +1133,47 @@ class Pipeline:
 
         processor = self._create_processor()
 
-        # 步骤1：公司名抽取
+        # 步骤1：公司名抽取（有历史时，若原始问题抽不到公司名，先重写再抽取）
         yield {"type": "status", "content": "正在识别公司名称..."}
         t1 = time.time()
         extracted_companies = processor._extract_companies_from_subset(question)
+        rewrite_result = None
+        question_category = "string"
+
+        if len(extracted_companies) == 0 and history_messages:
+            # 原始问题抽不到公司名，先执行问题重写以解析指代
+            yield {"type": "status", "content": "正在根据对话历史重写问题..."}
+            rewrite_result, question_category = self._rewrite_and_classify_parallel(
+                question, history_messages=history_messages
+            )
+            print(f"[计时] 问题重写+分类(提前): 类别: {question_category}")
+            print(f"[流式-问题重写] 结果: {rewrite_result}")
+            # 从重写后的问题中抽取公司名
+            rewritten_query = rewrite_result.get("rewritten_query", question) if isinstance(rewrite_result, dict) else question
+            extracted_companies = processor._extract_companies_from_subset(rewritten_query)
+
         if len(extracted_companies) == 0:
-            yield {"type": "error", "content": "未在问题中找到公司名称"}
-            return
+            # 回退：从历史消息中提取公司名
+            companies_df = getattr(processor, 'companies_df', None)
+            history_company = extract_company_from_history(history_messages, companies_df)
+            if history_company:
+                extracted_companies = [history_company]
+                print(f"[回退] 从历史消息中提取到公司名: {history_company}")
+            else:
+                yield {"type": "error", "content": "未在问题中找到公司名称"}
+                return
         company_name = extracted_companies[0]
         print(f"[计时] 公司名抽取: {time.time()-t1:.2f}s")
 
-        # 步骤2：问题重写 + 问题分类（并行执行）
-        yield {"type": "status", "content": "正在重写问题并分析问题类型..."}
-        t2 = time.time()
-        rewrite_result, question_category = self._rewrite_and_classify_parallel(question)
-        print(f"[计时] 问题重写+分类(并行): {time.time()-t2:.2f}s, 类别: {question_category}")
-        print(f"[流式-问题重写] 结果: {rewrite_result}")
+        # 步骤2：问题重写 + 问题分类（若步骤1已执行过则跳过）
+        if rewrite_result is None:
+            yield {"type": "status", "content": "正在重写问题并分析问题类型..."}
+            t2 = time.time()
+            rewrite_result, question_category = self._rewrite_and_classify_parallel(
+                question, history_messages=history_messages
+            )
+            print(f"[计时] 问题重写+分类(并行): {time.time()-t2:.2f}s, 类别: {question_category}")
+            print(f"[流式-问题重写] 结果: {rewrite_result}")
 
         # 步骤3：构建元数据过滤条件
         companies_df = getattr(processor, 'companies_df', None)
@@ -1199,6 +1187,11 @@ class Pipeline:
         rewritten_query, metadata_filters = build_metadata_filters(
             question, companies_df, rewrite_result, question_source=""
         )
+
+        # 追问场景：将前一轮问题的核心词合并到检索查询中，扩大召回范围
+        if history_messages:
+            rewritten_query = expand_followup_query(rewritten_query, history_messages)
+
         print(f"[流式-元数据过滤] rewritten_query: {rewritten_query}")
 
         # 步骤4：元数据过滤检索
@@ -1243,28 +1236,51 @@ class Pipeline:
         }
         selected_prompt = PROMPT_MAP.get(question_category, prompts.AnswerWithRAGContextStringPrompt)
         system_prompt = selected_prompt.system_prompt
+
+        # 追问场景：优先使用补全后的完整问题，避免歧义
+        completed_question = question  # 默认使用原始问题
+        if rewrite_result and isinstance(rewrite_result, dict):
+            completed_question = rewrite_result.get("completed_question", question)
+
         user_prompt = selected_prompt.user_prompt.format(
-            context=rag_context, question=question
+            context=rag_context, question=completed_question
         )
 
-        dashscope_processor = BaseDashscopeProcessor()
+        # 根据api_provider选择处理器
+        llm_processor = self._get_llm_processor()
 
         yield {"type": "stream_start", "content": ""}
 
         t4 = time.time()
         first_token = True
-        for token in dashscope_processor.send_message_stream(
-            model=self.run_config.answering_model,
-            system_content=system_prompt,
-            human_content=user_prompt
-        ):
-            if first_token:
-                print(f"[计时] LLM首字延迟(TTFT): {time.time()-t4:.2f}s")
-                first_token = False
-            yield {"type": "token", "content": token}
+
+        # v2: 如果有历史消息，构建包含历史的 messages 数组
+        if history_messages:
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history_messages)
+            messages.append({"role": "user", "content": user_prompt})
+            for token in llm_processor.send_message_stream(
+                model=self.run_config.answering_model,
+                messages=messages,
+            ):
+                if first_token:
+                    print(f"[计时] LLM首字延迟(TTFT): {time.time()-t4:.2f}s")
+                    first_token = False
+                yield {"type": "token", "content": token}
+        else:
+            # v1 兼容：无历史时保持原有调用方式
+            for token in llm_processor.send_message_stream(
+                model=self.run_config.answering_model,
+                system_content=system_prompt,
+                human_content=user_prompt
+            ):
+                if first_token:
+                    print(f"[计时] LLM首字延迟(TTFT): {time.time()-t4:.2f}s")
+                    first_token = False
+                yield {"type": "token", "content": token}
 
         # 步骤7：解析完整响应
-        full_content = getattr(dashscope_processor, '_stream_full_content', '')
+        full_content = getattr(llm_processor, '_stream_full_content', '')
 
         answer_dict = {"step_by_step_analysis": "", "reasoning_summary": "",
                        "relevant_pages": [], "final_answer": full_content}
@@ -1288,6 +1304,10 @@ class Pipeline:
                 parsed = _json.loads(json_str)
                 if isinstance(parsed, dict):
                     answer_dict = parsed
+                    # 如果 final_answer 为空，回退使用 step_by_step_analysis 或 full_content
+                    if not answer_dict.get("final_answer"):
+                        fallback = answer_dict.get("step_by_step_analysis", "") or full_content
+                        answer_dict["final_answer"] = fallback
             except (_json.JSONDecodeError, TypeError):
                 pass
 
@@ -1350,11 +1370,11 @@ hybrid_bm25_vector_config = RunConfig(
     parallel_requests=4,
     submission_file=True,
     use_metadata_filter=True,
-    pipeline_details="Custom pdf parsing + BM25+Vector Hybrid + DashScope Rerank + Parent Document Retrieval + SO CoT; llm = kimi-k2.6",
-    answering_model="kimi-k2.6",
-    rewrite_model="qwen-turbo",
-    api_provider="dashscope",
-    config_suffix="_hybrid_bm25_vec_rerank_kimi_k26_v2"
+    pipeline_details="Custom pdf parsing + BM25+Vector Hybrid + DashScope Rerank + Parent Document Retrieval + SO CoT; llm = gpt-4-turbo",
+    answering_model="gpt-4-turbo",
+    rewrite_model="gpt-3.5-turbo",
+    api_provider="fe8",
+    config_suffix="_hybrid_bm25_vec_rerank_fe8_gpt4"
 )
 
 

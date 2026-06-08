@@ -35,6 +35,7 @@ export interface Message {
   details?: MessageDetails;
   thinkingSteps?: ThinkingStep[];
   thinkingCollapsed?: boolean;
+  skipAnimation?: boolean;  // 从缓存/API恢复的消息，跳过打字机动画直接展示
 }
 
 // SSE 事件类型
@@ -61,4 +62,33 @@ export interface KBFile {
 export interface KBStatus {
   total_files: number;
   files: KBFile[];
+}
+
+// v2 新增: 会话摘要
+export interface SessionSummary {
+  id: string;
+  title: string;
+  last_message: string;
+  updated_at: string;
+  message_count: number;
+}
+
+// v2 新增: 会话消息
+export interface SessionMessage {
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  metadata?: {
+    company_name?: string;
+    question_category?: string;
+  };
+}
+
+// v2 新增: 会话详情
+export interface SessionDetail {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: SessionMessage[];
 }

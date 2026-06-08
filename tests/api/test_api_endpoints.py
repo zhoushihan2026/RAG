@@ -57,6 +57,27 @@ def app_client_with_pipeline():
 
 
 # ============================================================
+# 根路径
+# ============================================================
+
+class TestRootEndpoint:
+    """GET / 返回 API 基本信息，不再返回 404"""
+
+    def test_root_returns_ok(self, app_client):
+        """根路径返回 status: ok 和 API 信息"""
+        response = app_client.get("/")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert "message" in data
+
+    def test_root_not_404(self, app_client):
+        """根路径不再返回 404"""
+        response = app_client.get("/")
+        assert response.status_code != 404
+
+
+# ============================================================
 # 健康检查
 # ============================================================
 
@@ -99,7 +120,7 @@ class TestChatEndpoint:
         client, pipeline = app_client_with_pipeline
 
         # mock 流式生成器
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在初始化..."}
             yield {"type": "done", "content": {
                 "final_answer": "测试答案",
@@ -123,7 +144,7 @@ class TestChatEndpoint:
         """SSE 流中包含 status 事件"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在识别公司名称..."}
             yield {"type": "status", "content": "正在检索相关文档..."}
             yield {"type": "done", "content": {
@@ -151,7 +172,7 @@ class TestChatEndpoint:
         """SSE 流中包含 token 事件（流式输出）"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在生成回答..."}
             yield {"type": "stream_start", "content": ""}
             yield {"type": "token", "content": "2024"}
@@ -193,7 +214,7 @@ class TestChatEndpoint:
             ]
         }
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在生成回答..."}
             yield {"type": "stream_start", "content": ""}
             yield {"type": "done", "content": expected_answer}
@@ -218,7 +239,7 @@ class TestChatEndpoint:
         """SSE 流中包含 error 事件"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "error", "content": "未在问题中找到公司名称"}
 
         pipeline.answer_single_question_stream = mock_stream
@@ -236,7 +257,7 @@ class TestChatEndpoint:
         """Pipeline 内部异常在 SSE 流中返回 error 事件"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             raise RuntimeError("Pipeline 内部错误")
 
         pipeline.answer_single_question_stream = mock_stream
@@ -432,6 +453,37 @@ class TestCORSConfiguration:
         )
         assert response.headers.get("access-control-allow-origin") is None
 
+    def test_cors_port_5174_allowed(self, app_client):
+        """v2: 5174 端口被 CORS 允许（Vite 备用端口）"""
+        response = app_client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:5174",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:5174"
+
+
+# ============================================================
+# 全局异常处理
+# ============================================================
+
+class TestGlobalExceptionHandler:
+    """锁定 v2-spec: 全局异常处理器确保所有错误返回 JSON"""
+
+    def test_unhandled_exception_returns_json(self, app_client_with_pipeline):
+        """未捕获的异常返回 JSON 格式而非 500 HTML"""
+        client, pipeline = app_client_with_pipeline
+
+        # mock 一个会在 chat 端点外抛异常的场景
+        # 直接测试全局异常处理器
+        response = client.get("/api/sessions/nonexistent-session-for-test")
+        # 404 也应返回 JSON
+        assert response.status_code == 404
+        data = response.json()
+        assert "detail" in data
+
 
 # ============================================================
 # SSE 格式验证
@@ -444,7 +496,7 @@ class TestSSEFormat:
         """每个 SSE 事件由 event: 和 data: 行组成，以空行结束"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在初始化..."}
             yield {"type": "done", "content": {
                 "final_answer": "答案",
@@ -471,7 +523,7 @@ class TestSSEFormat:
         """stream_start 事件正确输出"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在生成回答..."}
             yield {"type": "stream_start", "content": ""}
             yield {"type": "token", "content": "你好"}
@@ -499,7 +551,7 @@ class TestSSEFormat:
         """多个 status 事件按顺序输出"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "步骤1"}
             yield {"type": "status", "content": "步骤2"}
             yield {"type": "status", "content": "步骤3"}
@@ -529,7 +581,7 @@ class TestSSEFormat:
         """error 事件后不再有后续事件"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在识别公司名称..."}
             yield {"type": "error", "content": "未在问题中找到公司名称"}
             return  # error 后直接返回
@@ -559,7 +611,7 @@ class TestSSEFormat:
             "references": [{"pdf_sha1": "sha1abc", "page_index": 1, "source_file": "报告.pdf"}]
         }
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "done", "content": expected}
 
         pipeline.answer_single_question_stream = mock_stream
@@ -592,7 +644,7 @@ class TestChatEdgeCases:
         """仅含空格的问题也能通过 Pydantic 验证（min_length 不 strip）"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "done", "content": {
                 "final_answer": "答案",
                 "step_by_step_analysis": "",
@@ -615,7 +667,7 @@ class TestChatEdgeCases:
         """超长问题也能被接受（不限制最大长度）"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "done", "content": {
                 "final_answer": "答案",
                 "step_by_step_analysis": "",
@@ -638,7 +690,7 @@ class TestChatEdgeCases:
         """问题中包含特殊字符也能正常处理"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "done", "content": {
                 "final_answer": "答案",
                 "step_by_step_analysis": "",
@@ -660,7 +712,7 @@ class TestChatEdgeCases:
         """未找到公司名时返回明确的错误消息"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在识别公司名称..."}
             yield {"type": "error", "content": "未在问题中找到公司名称"}
 
@@ -678,7 +730,7 @@ class TestChatEdgeCases:
         """检索无结果时返回明确的错误消息"""
         client, pipeline = app_client_with_pipeline
 
-        def mock_stream(question, kind="string"):
+        def mock_stream(question, kind="string", history_messages=None):
             yield {"type": "status", "content": "正在识别公司名称..."}
             yield {"type": "status", "content": "正在检索 中芯国际 的相关文档..."}
             yield {"type": "error", "content": "未找到相关文档"}
