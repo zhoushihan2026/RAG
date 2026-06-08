@@ -18,13 +18,13 @@
 
 展示各模块之间的依赖与数据流向：
 
-![技术架构图](docs/architecture.png)
+![技术架构图](docs/architecture-v2.png)
 
 ### 系统全流程图
 
 包含**知识入库流程**（离线/增量）和**用户提问流程**（在线/实时）两条主线：
 
-![全流程图](docs/flowchart.png)
+![全流程图](docs/flowchart-v2.png)
 
 
 ## 快速开始
