@@ -3,6 +3,7 @@ import logging
 import tempfile
 import shutil
 import os
+import threading
 from typing import List, Tuple, Dict, Union
 from rank_bm25 import BM25Okapi
 import pickle
@@ -18,9 +19,11 @@ _log = logging.getLogger(__name__)
 
 class DashScopeEmbedding:
     """基于DashScope API的Embedding模型（text-embedding-v4）"""
-    
+
     _client = None
     _model_name = "text-embedding-v4"
+    _dimensions = 1024
+    _batch_size = 6  # DashScope text-embedding-v4 每批最大 25 条
     
     def __init__(self):
         if DashScopeEmbedding._client is None:
@@ -44,14 +47,14 @@ class DashScopeEmbedding:
         
         all_embeddings = []
         
-        for i in range(0, len(texts), 6):
-            batch = texts[i:i+6]
+        for i in range(0, len(texts), self._batch_size):
+            batch = texts[i:i+self._batch_size]
             
             try:
                 response = DashScopeEmbedding._client.embeddings.create(
                     model=self._model_name,
                     input=batch,
-                    dimensions=1024
+                    dimensions=self._dimensions
                 )
                 
                 batch_embeddings = [item.embedding for item in response.data]
@@ -141,9 +144,6 @@ class BM25Retriever:
 
         return retrieval_results
 
-
-
-EMBEDDING_MODEL_PATH = "/root/autodl-tmp/embedding/Qwen/Qwen3-Embedding-4B"
 
 
 class VectorRetriever:
@@ -515,6 +515,32 @@ class MetadataFilteredRetriever:
     """
 
     MIN_RESULTS = 3
+
+    # 模块级缓存：缓存键 -> 实例
+    _cache: dict = {}
+    _cache_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls, vector_db_dir: Path, documents_dir: Path, bm25_db_dir: Path,
+                     metadata_path: Path, alpha: float = 0.5):
+        """获取缓存的单例实例，相同参数只创建一次"""
+        cache_key = (str(vector_db_dir), str(documents_dir), str(bm25_db_dir), str(metadata_path), alpha)
+        with cls._cache_lock:
+            if cache_key not in cls._cache:
+                cls._cache[cache_key] = cls(
+                    vector_db_dir=vector_db_dir,
+                    documents_dir=documents_dir,
+                    bm25_db_dir=bm25_db_dir,
+                    metadata_path=metadata_path,
+                    alpha=alpha
+                )
+            return cls._cache[cache_key]
+
+    @classmethod
+    def clear_cache(cls):
+        """清空缓存，下次 get_instance 会重新加载"""
+        with cls._cache_lock:
+            cls._cache.clear()
 
     def __init__(self, vector_db_dir: Path, documents_dir: Path, bm25_db_dir: Path,
                  metadata_path: Path, alpha: float = 0.5):

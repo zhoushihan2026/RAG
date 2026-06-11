@@ -45,10 +45,13 @@ class Session:
 class SessionManager:
     """会话管理器，挂载在 app.state.session_manager"""
 
-    def __init__(self, max_user_messages_per_session=50, max_history_rounds=5):
+    def __init__(self, max_user_messages_per_session=50, max_history_rounds=5,
+                 max_history_chars=6000, single_msg_max_chars=3000):
         self.sessions: dict[str, Session] = {}
         self.max_user_messages = max_user_messages_per_session
         self.max_history_rounds = max_history_rounds
+        self.max_history_chars = max_history_chars
+        self.single_msg_max_chars = single_msg_max_chars
 
     def get_or_create(self, session_id: str) -> Session:
         """获取或创建会话"""
@@ -70,8 +73,8 @@ class SessionManager:
         recent_messages = session.messages[-max_msgs:]
 
         # token 截断：总字符数不超过阈值
-        MAX_CHARS = 6000   # 约 4000 tokens（中文 1.5 字符/token）
-        SINGLE_MSG_MAX = 3000  # 约 2000 tokens
+        MAX_CHARS = self.max_history_chars
+        SINGLE_MSG_MAX = self.single_msg_max_chars
 
         result = []
         total_chars = 0

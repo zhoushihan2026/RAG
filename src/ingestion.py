@@ -91,8 +91,9 @@ class BM25Ingestor:
 
 
 class VectorDBIngestor:
-    def __init__(self, model_path: str = "/root/autodl-tmp/embedding/Qwen/Qwen3-Embedding-4B"):
+    def __init__(self, embedding_batch_size=4):
         self.model = DashScopeEmbedding()
+        self.embedding_batch_size = embedding_batch_size
 
     def _get_embeddings(self, text: Union[str, List[str]]) -> List[float]:
         if isinstance(text, str) and not text.strip():
@@ -114,7 +115,7 @@ class VectorDBIngestor:
             text_chunks,
             normalize_embeddings=True,
             show_progress_bar=True,
-            batch_size=4
+            batch_size=self.embedding_batch_size
         )
         return embeddings.tolist()
 

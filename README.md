@@ -138,6 +138,7 @@ RAG-zsh/
 │   └── autodl_deploy.sh      # AutoDL 部署脚本
 │
 ├── src/                       # 核心源代码
+│   ├── constants.py          # 业务常量集中管理（KNOWN_BROKERS、DOC_TYPE_KEYWORDS 等）
 │   ├── pipeline.py           # 主流程调度与配置管理
 │   ├── api_requests.py       # LLM API 统一封装（OpenAI/DashScope/Gemini/fe8）
 │   ├── api_request_parallel_processor.py  # 并发请求处理器
@@ -169,15 +170,22 @@ RAG-zsh/
 │   ├── image/                # 图片描述测试
 │   ├── pipeline/             # Pipeline 测试
 │   ├── qa/                   # 问答逻辑测试
-│   ├── retrieval/            # 检索测试
+│   ├── retrieval/            # 检索测试（含单例缓存测试）
 │   └── session/              # 会话管理测试
+│
+├── web/src/__tests__/        # 前端测试
+│   ├── App.test.tsx          # App 组件核心逻辑测试
+│   └── test_refresh_restore.test.tsx  # 刷新恢复会话状态 TDD 测试
 │
 ├── spec/                     # 设计规范文档
 │   ├── api-spec.md           # API 契约规范
 │   ├── frontend-spec.md      # 前端交互规范
 │   ├── behavior-spec.md      # 行为规范
 │   ├── legacy-audit.md       # 遗留代码审计
-│   └── v2-spec.md            # v2 多轮对话规格说明
+│   ├── v2-spec.md            # v2 多轮对话规格说明
+│   ├── hardcode-fix-spec.md  # 硬编码修复规格说明
+│   ├── retriever-cache-spec.md    # 检索器单例缓存优化规格
+│   └── refresh-session-restore-spec.md  # 刷新恢复会话状态规格
 │
 ├── docs/                     # 文档与图表
 │   ├── src_modules_overview.md  # 模块详细说明
@@ -201,15 +209,22 @@ RAG-zsh/
 - 新建对话、切换会话、重命名标题、删除会话
 - 首条用户消息自动设置会话标题（前 20 字）
 - 会话上限 50 条用户消息，过期会话可清理
+- **刷新恢复**：页面刷新后自动恢复当前会话的问答记录（含推理过程、推理摘要、参考来源），不显示流式动画
+- **新建会话**：点击新建对话不立即创建侧边栏条目，首次提问后才出现记录
+
+### 性能优化
+
+- **检索器单例缓存**：`MetadataFilteredRetriever` 和 `QuestionsProcessor` 采用单例模式，避免每次请求重复加载 FAISS/BM25 索引，首次请求后检索准备时间从 ~15s 降到 <1s
+- **LLM 处理器按需创建**：每次请求创建新实例，避免多线程并发共享 httpx.Client 导致线程竞争
 
 ### 模型配置
 
 | 用途 | 模型 | API 提供方 |
 |------|------|-----------|
-| 问题重写 + 分类 | gpt-3.5-turbo | fe8.cn |
+| 问题重写 + 分类 | qwen-turbo | fe8.cn / 阿里云百炼 |
 | 查询向量化 | text-embedding-v4 | DashScope |
 | 检索结果重排 | qwen3-rerank | DashScope |
-| 生成最终回答 | gpt-4-turbo | fe8.cn |
+| 生成最终回答 | MiniMax-M2.5 | fe8.cn / 阿里云百炼 |
 
 ### 回答分段
 
@@ -223,7 +238,7 @@ RAG-zsh/
 | `pdr` | 父文档检索 | 检索 chunk 后返回整页内容 |
 | `max` | 全功能配置 | 父文档检索 + LLM 重排 |
 | `hybrid_bm25_vector` | BM25 + 向量混合召回 + DashScope Rerank | |
-| `hybrid_bm25_vec_rerank_fe8_gpt4` | **v2 推荐配置** | BM25 + 向量混合 + Rerank + fe8 GPT 模型 |
+| `hybrid_bm25_vec_rerank_fe8_gpt4` | **v2 推荐配置** | BM25 + 向量混合 + Rerank + fe8 模型（qwen-turbo / MiniMax-M2.5） |
 
 ## 数据集说明
 

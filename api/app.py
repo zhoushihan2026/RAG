@@ -66,10 +66,12 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
     """创建 FastAPI 应用实例"""
     app = FastAPI(title="RAG 企业知识库问答系统 API", version="1.0.0")
 
-    # CORS 配置
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
+    # CORS 配置：优先从环境变量读取，否则使用开发默认值
+    cors_origins_str = os.getenv("CORS_ORIGINS", "")
+    if cors_origins_str:
+        allow_origins = [origin.strip() for origin in cors_origins_str.split(",")]
+    else:
+        allow_origins = [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:5174",
@@ -78,7 +80,11 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
             "http://127.0.0.1:5178",
             "http://localhost:5180",
             "http://127.0.0.1:5180",
-        ],
+        ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS", "DELETE", "PATCH"],
         allow_headers=["Content-Type"],
@@ -150,6 +156,7 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
 
         def event_generator():
             final_answer = ""
+            answer_details = {}  # 保存完整详情，用于会话持久化
             try:
                 for event in pipeline.answer_single_question_stream(
                     request.question, kind="string",
@@ -161,6 +168,15 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
                     # 收集最终答案（用于保存到会话）
                     if event_type == "done" and isinstance(event_content, dict):
                         final_answer = event_content.get("final_answer", "")
+                        # 保存完整详情（thinking、references 等），刷新后可恢复
+                        answer_details = {
+                            "final_answer": final_answer,
+                            "step_by_step_analysis": event_content.get("step_by_step_analysis", ""),
+                            "reasoning_summary": event_content.get("reasoning_summary", ""),
+                            "relevant_pages": event_content.get("relevant_pages", []),
+                            "references": event_content.get("references", []),
+                            "source_files": event_content.get("source_files", {}),
+                        }
                         # 回退：如果 final_answer 为空，使用 step_by_step_analysis
                         if not final_answer:
                             final_answer = event_content.get("step_by_step_analysis", "")
@@ -181,11 +197,11 @@ def create_app(pipeline: Pipeline = None) -> FastAPI:
                 error_event = f"event: error\ndata: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
                 yield error_event
             finally:
-                # v2: 保存助手回答到会话
+                # v2: 保存助手回答到会话（含完整详情，刷新后可恢复 thinking/references）
                 session_manager.add_message(
                     session_id, "assistant",
                     final_answer or "回答生成失败",
-                    metadata={"company_name": "", "question_category": ""}
+                    metadata=answer_details or {"company_name": "", "question_category": ""}
                 )
 
         return StreamingResponse(

@@ -69,8 +69,8 @@ class RunConfig:
     submission_file: bool = True                 # 是否生成提交格式的答案文件
     full_context: bool = False                   # 是否使用全量上下文（跳过检索，直接返回整篇报告）
     api_provider: str = "fe8"                    # API提供商：dashscope / fe8
-    answering_model: str = "gpt-4-turbo"          # 回答模型：gpt-4-turbo（fe8）/ qwen3.7-plus（dashscope）
-    rewrite_model: str = "gpt-3.5-turbo"          # 重写/分类模型：gpt-3.5-turbo（fe8）/ qwen-turbo（dashscope）
+    answering_model: str = "MiniMax-M2.5"          # 回答模型：MiniMax-M2.5（fe8）/ qwen3.7-plus（dashscope）
+    rewrite_model: str = "qwen-turbo"              # 重写/分类模型：qwen-turbo（fe8/dashscope）
     config_suffix: str = ""                      # 配置后缀，用于区分不同实验的输出文件名
     use_metadata_filter: bool = False            # 是否启用元数据过滤检索（统一向量库+元数据过滤+问题重写）
 
@@ -80,6 +80,8 @@ class Pipeline:
         self.run_config = run_config
         self.paths = self._initialize_paths(root_path, subset_name, questions_file_name, pdf_reports_dir_name)
         self._convert_json_to_csv_if_needed()
+        # 缓存：避免每次请求重复创建
+        self._cached_processor = None
 
     def _initialize_paths(self, root_path: Path, subset_name: str, questions_file_name: str, pdf_reports_dir_name: str) -> PipelineConfig:
         """根据配置初始化所有路径"""
@@ -957,7 +959,7 @@ class Pipeline:
         """
         t0 = time.time()
         print("[计时] 开始初始化 QuestionsProcessor ...")
-        processor = self._create_processor()
+        processor = self._get_or_create_processor()
         t1 = time.time()
         print(f"[计时] QuestionsProcessor 初始化耗时: {t1-t0:.2f} 秒")
 
@@ -1007,8 +1009,14 @@ class Pipeline:
             use_metadata_filter=self.run_config.use_metadata_filter
         )
 
+    def _get_or_create_processor(self):
+        """获取或创建QuestionsProcessor实例（Pipeline内复用）"""
+        if self._cached_processor is None:
+            self._cached_processor = self._create_processor()
+        return self._cached_processor
+
     def _get_llm_processor(self):
-        """根据api_provider配置返回对应的LLM处理器"""
+        """根据api_provider配置返回对应的LLM处理器（每次创建新实例，避免多线程并发共享客户端）"""
         if self.run_config.api_provider == "fe8":
             from src.api_requests import Fe8Processor
             return Fe8Processor()
@@ -1129,12 +1137,11 @@ class Pipeline:
 
         t0 = time.time()
 
-        yield {"type": "status", "content": "正在初始化..."}
+        yield {"type": "status", "content": "检索资料中..."}
 
-        processor = self._create_processor()
+        processor = self._get_or_create_processor()
 
         # 步骤1：公司名抽取（有历史时，若原始问题抽不到公司名，先重写再抽取）
-        yield {"type": "status", "content": "正在识别公司名称..."}
         t1 = time.time()
         extracted_companies = processor._extract_companies_from_subset(question)
         rewrite_result = None
@@ -1142,7 +1149,6 @@ class Pipeline:
 
         if len(extracted_companies) == 0 and history_messages:
             # 原始问题抽不到公司名，先执行问题重写以解析指代
-            yield {"type": "status", "content": "正在根据对话历史重写问题..."}
             rewrite_result, question_category = self._rewrite_and_classify_parallel(
                 question, history_messages=history_messages
             )
@@ -1166,8 +1172,8 @@ class Pipeline:
         print(f"[计时] 公司名抽取: {time.time()-t1:.2f}s")
 
         # 步骤2：问题重写 + 问题分类（若步骤1已执行过则跳过）
+        yield {"type": "status", "content": "推理思考中..."}
         if rewrite_result is None:
-            yield {"type": "status", "content": "正在重写问题并分析问题类型..."}
             t2 = time.time()
             rewrite_result, question_category = self._rewrite_and_classify_parallel(
                 question, history_messages=history_messages
@@ -1195,10 +1201,9 @@ class Pipeline:
         print(f"[流式-元数据过滤] rewritten_query: {rewritten_query}")
 
         # 步骤4：元数据过滤检索
-        yield {"type": "status", "content": f"正在检索 {company_name} 的相关文档..."}
         t3 = time.time()
 
-        retriever = MetadataFilteredRetriever(
+        retriever = MetadataFilteredRetriever.get_instance(
             vector_db_dir=processor.vector_db_dir,
             documents_dir=processor.documents_dir,
             bm25_db_dir=processor.bm25_db_dir,
@@ -1226,7 +1231,6 @@ class Pipeline:
         print(f"[流式] 上下文长度: {context_chars} 字符")
 
         # 步骤6：流式生成
-        yield {"type": "status", "content": "正在生成回答..."}
 
         PROMPT_MAP = {
             "fact_extraction": prompts.AnswerWithRAGContextFactPrompt,
@@ -1249,8 +1253,6 @@ class Pipeline:
         # 根据api_provider选择处理器
         llm_processor = self._get_llm_processor()
 
-        yield {"type": "stream_start", "content": ""}
-
         t4 = time.time()
         first_token = True
 
@@ -1266,6 +1268,8 @@ class Pipeline:
                 if first_token:
                     print(f"[计时] LLM首字延迟(TTFT): {time.time()-t4:.2f}s")
                     first_token = False
+                    yield {"type": "stream_start", "content": ""}
+                    yield {"type": "status", "content": "正在生成回答..."}
                 yield {"type": "token", "content": token}
         else:
             # v1 兼容：无历史时保持原有调用方式
@@ -1277,6 +1281,8 @@ class Pipeline:
                 if first_token:
                     print(f"[计时] LLM首字延迟(TTFT): {time.time()-t4:.2f}s")
                     first_token = False
+                    yield {"type": "stream_start", "content": ""}
+                    yield {"type": "status", "content": "正在生成回答..."}
                 yield {"type": "token", "content": token}
 
         # 步骤7：解析完整响应
@@ -1370,9 +1376,9 @@ hybrid_bm25_vector_config = RunConfig(
     parallel_requests=4,
     submission_file=True,
     use_metadata_filter=True,
-    pipeline_details="Custom pdf parsing + BM25+Vector Hybrid + DashScope Rerank + Parent Document Retrieval + SO CoT; llm = gpt-4-turbo",
-    answering_model="gpt-4-turbo",
-    rewrite_model="gpt-3.5-turbo",
+    pipeline_details="Custom pdf parsing + BM25+Vector Hybrid + DashScope Rerank + Parent Document Retrieval + SO CoT; llm = MiniMax-M2.5",
+    answering_model="MiniMax-M2.5",
+    rewrite_model="qwen-turbo",
     api_provider="fe8",
     config_suffix="_hybrid_bm25_vec_rerank_fe8_gpt4"
 )

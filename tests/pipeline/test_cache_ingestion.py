@@ -184,19 +184,19 @@ class TestExportReportsDeadCode:
 
 
 # ============================================================
-# S-3.5 现状: VectorDBIngestor model_path 参数未使用
+# S-3.5 已修复: VectorDBIngestor model_path 参数已移除（死代码清理）
 # ============================================================
 
 class TestVectorDBIngestorModelPath:
-    """锁定现状 S-3.5 / 5.14: VectorDBIngestor 构造函数的 model_path 参数未使用"""
+    """验证: VectorDBIngestor 构造函数不再接受 model_path 参数，始终使用 DashScopeEmbedding()"""
 
-    def test_model_path_ignored(self, mock_env_vars):
+    def test_default_uses_dashscope(self, mock_env_vars):
         """
-        现状: VectorDBIngestor.__init__ 接受 model_path 参数但内部忽略。
-        调用方传入 model_path 不会生效，始终使用 DashScopeEmbedding()。
+        验证: VectorDBIngestor.__init__ 不再接受 model_path 参数，
+        始终使用 DashScopeEmbedding()。
         """
         from src.ingestion import VectorDBIngestor
 
-        ingestor = VectorDBIngestor(model_path="/custom/path/to/model")
+        ingestor = VectorDBIngestor()
         from src.retrieval import DashScopeEmbedding
         assert isinstance(ingestor.model, DashScopeEmbedding)

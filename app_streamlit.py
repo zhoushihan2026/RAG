@@ -1,9 +1,11 @@
 import streamlit as st
+import os
 from pathlib import Path
 from src.pipeline import Pipeline, hybrid_bm25_vector_config
+from src.constants import DEFAULT_DATA_PATH
 import json
 
-root_path = Path("data/stock_data")
+root_path = Path(os.getenv("RAG_DATA_PATH", DEFAULT_DATA_PATH))
 pipeline = Pipeline(root_path, run_config=hybrid_bm25_vector_config)
 
 st.set_page_config(page_title="RAG 企业知识库问答系统", layout="wide", page_icon="")

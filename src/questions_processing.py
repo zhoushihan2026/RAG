@@ -6,6 +6,7 @@ from src.retrieval import (VectorRetriever, BM25Retriever, HybridRetriever,
                            HybridBM25VectorRetriever, MetadataFilteredRetriever)
 from src.api_requests import APIProcessor
 from src import prompts
+from src.constants import KNOWN_BROKERS
 from tqdm import tqdm
 import pandas as pd
 import threading
@@ -94,7 +95,6 @@ def build_metadata_filters(question_text: str, companies_df: pd.DataFrame,
     filters = {}
 
     # 提取被分析公司名（排除券商名干扰）
-    KNOWN_BROKERS = ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]
     clean_question = question_text
     for broker in sorted(KNOWN_BROKERS, key=len, reverse=True):
         clean_question = clean_question.replace(broker, '')
@@ -175,7 +175,6 @@ def extract_company_from_history(history_messages: list[dict], companies_df) -> 
 
     company_names = sorted(companies_df['company_name'].unique(), key=len, reverse=True)
     # 已知券商名，排除干扰
-    KNOWN_BROKERS = ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]
 
     # 遍历历史中的用户消息（从最近到最早），找到第一个包含公司名的
     user_msgs = [m for m in history_messages if m["role"] == "user"]
@@ -623,7 +622,6 @@ class QuestionsProcessor:
                 self.companies_df = pd.read_csv(self.subset_path, encoding='gbk')
 
         # 先排除问题中的券商名，避免误匹配
-        KNOWN_BROKERS = ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]
         clean_question = question_text
         for broker in sorted(KNOWN_BROKERS, key=len, reverse=True):
             clean_question = clean_question.replace(broker, '')

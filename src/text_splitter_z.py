@@ -6,6 +6,8 @@ from typing import List, Dict, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import pandas as pd
 import os
+from src.constants import (KNOWN_BROKERS, DOC_TYPE_KEYWORDS, CHUNK_CONFIG_BY_DOC_TYPE,
+                           DEFAULT_CHUNK_CONFIG, DEFAULT_INDUSTRY)
 
 
 # 文本分块工具类，支持按页分块、表格插入、token统计等
@@ -231,7 +233,6 @@ class TextSplitter():
 
     def _extract_broker(self, file_name: str) -> str:
         """从文件名中提取券商名"""
-        KNOWN_BROKERS = ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]
         for broker in sorted(KNOWN_BROKERS, key=len, reverse=True):
             if broker in file_name:
                 return broker
@@ -580,13 +581,14 @@ class TextSplitter():
         """
         批量处理目录下所有 markdown 文件，按文档类型差异化分块并输出为 json 文件。
         """
-        # 建立 file_name（去扩展名）到 company_name、broker、sha1、coverage_start、coverage_end、doc_type 的映射
+        # 建立 file_name（去扩展名）到 company_name、broker、sha1、coverage_start、coverage_end、doc_type、industry 的映射
         file2company = {}
         file2sha1 = {}
         file2broker = {}
         file2coverage_start = {}
         file2coverage_end = {}
         file2doc_type_from_csv = {}
+        file2industry = {}
         if subset_csv is not None and os.path.exists(subset_csv):
             try:
                 df = pd.read_csv(subset_csv, encoding='utf-8-sig')
@@ -610,6 +612,8 @@ class TextSplitter():
                         file2coverage_end[file_no_ext] = str(row['coverage_end']).strip()
                     if 'doc_type' in row and pd.notna(row.get('doc_type')):
                         file2doc_type_from_csv[file_no_ext] = str(row['doc_type']).strip()
+                    if 'industry' in row and pd.notna(row.get('industry')):
+                        file2industry[file_no_ext] = str(row['industry']).strip()
             elif 'sha1' in df.columns:
                 for _, row in df.iterrows():
                     file_no_ext = str(row['sha1'])
@@ -623,6 +627,8 @@ class TextSplitter():
                         file2coverage_end[file_no_ext] = str(row['coverage_end']).strip()
                     if 'doc_type' in row and pd.notna(row.get('doc_type')):
                         file2doc_type_from_csv[file_no_ext] = str(row['doc_type']).strip()
+                    if 'industry' in row and pd.notna(row.get('industry')):
+                        file2industry[file_no_ext] = str(row['industry']).strip()
             else:
                 raise ValueError('subset.csv 缺少 file_name 或 sha1 列，无法建立文件名到公司名的映射')
 
@@ -633,22 +639,16 @@ class TextSplitter():
             base_name = md_path.stem
 
             # ========== 文档类型识别 ==========
-            if "【财报】" in base_name or "年报" in base_name:
-                doc_type = "年报"
-                actual_chunk_size = 800
-                actual_chunk_overlap = 100
-            elif any(broker in base_name for broker in ["东方证券", "光大证券", "国信证券", "上海证券", "中原证券", "兴证国际", "华泰证券"]):
-                doc_type = "券商研报"
-                actual_chunk_size = 600
-                actual_chunk_overlap = 100
-            elif "调研纪要" in base_name:
-                doc_type = "调研纪要"
-                actual_chunk_size = 600
-                actual_chunk_overlap = 100
-            else:
-                doc_type = "unknown"
-                actual_chunk_size = chunk_size
-                actual_chunk_overlap = chunk_overlap
+            doc_type = "unknown"
+            for dtype, keywords in DOC_TYPE_KEYWORDS.items():
+                if any(kw in base_name for kw in keywords):
+                    doc_type = dtype
+                    break
+
+            # 根据文档类型获取分块参数
+            chunk_cfg = CHUNK_CONFIG_BY_DOC_TYPE.get(doc_type, DEFAULT_CHUNK_CONFIG)
+            actual_chunk_size = chunk_cfg["chunk_size"]
+            actual_chunk_overlap = chunk_cfg["chunk_overlap"]
 
             # ========== 调研纪要：预识别 Q&A 对 ==========
             if doc_type == "调研纪要":
@@ -680,7 +680,7 @@ class TextSplitter():
                 chunk["quarter"] = self._extract_quarter(base_name)
                 chunk["coverage_start"] = coverage_start
                 chunk["coverage_end"] = coverage_end
-                chunk["industry"] = "半导体"
+                chunk["industry"] = file2industry.get(base_name, DEFAULT_INDUSTRY)
                 chunk["source_file"] = md_path.name
 
             # ========== 输出 ==========

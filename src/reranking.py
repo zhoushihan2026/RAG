@@ -346,7 +346,7 @@ class LocalReranker:
     _model = None
     _model_available = False
 
-    def __init__(self, model_path: str = "/root/autodl-tmp/rerank/BAAI/bge-reranker-v2-m3"):
+    def __init__(self):
         if LocalReranker._model is None and not LocalReranker._model_available:
             try:
                 LocalReranker._model = DashScopeReranker()

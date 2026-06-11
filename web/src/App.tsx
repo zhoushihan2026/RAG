@@ -14,25 +14,34 @@ function generateId() {
 // 从后端 SessionMessage[] 构建完整前端 Message[]
 // 尝试从 metadata 中恢复 details，避免历史消息被判定为错误（红色）
 function buildMessagesFromDetail(sessionMsgs: SessionMessage[]): Message[] {
-  return sessionMsgs.map((msg, idx) => ({
-    id: generateId() + idx,
-    role: msg.role,
-    content: msg.content,
-    isStreaming: false,
-    // 助手消息：构造空 details 避免显示为红色错误
-    // 注意：thinkingSteps 和 references 无法从后端完全恢复，但至少保证不报错样式
-    ...(msg.role === "assistant" ? {
-      details: {
-        final_answer: msg.content,
-        step_by_step_analysis: "",
-        reasoning_summary: "",
-        relevant_pages: [],
-        source_files: {},
-        references: [],
-      } as MessageDetails,
-      thinkingCollapsed: true,
-    } : {}),
-  }));
+  return sessionMsgs.map((msg, idx) => {
+    const base = {
+      id: generateId() + idx,
+      role: msg.role,
+      content: msg.content,
+      isStreaming: false,
+      // 刷新恢复的消息不播放打字机动画
+      skipAnimation: true as const,
+    };
+
+    if (msg.role === "assistant") {
+      // 从后端 metadata 中恢复完整详情（thinking、references 等）
+      const meta = (msg as any).metadata || {};
+      return {
+        ...base,
+        details: {
+          final_answer: meta.final_answer || msg.content,
+          step_by_step_analysis: meta.step_by_step_analysis || "",
+          reasoning_summary: meta.reasoning_summary || "",
+          relevant_pages: meta.relevant_pages || [],
+          source_files: meta.source_files || {},
+          references: meta.references || [],
+        } as MessageDetails,
+        thinkingCollapsed: true,
+      };
+    }
+    return base;
+  });
 }
 
 export default function App() {
@@ -55,20 +64,47 @@ export default function App() {
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
-  // 页面挂载时加载会话列表
+  // 页面挂载时加载会话列表，并恢复上次活跃会话的消息
   useEffect(() => {
     getSessions()
       .then((data) => {
         setSessions(data.sessions);
-        // 默认选中最近一个会话
-        if (data.sessions.length > 0) {
-          setActiveSessionId(data.sessions[0].id);
+        if (data.sessions.length === 0) return;
+
+        // 优先从 sessionStorage 恢复上次活跃的会话
+        const persistedId = sessionStorage.getItem("rag_active_session_id");
+        const targetSession = persistedId
+          ? data.sessions.find((s) => s.id === persistedId)
+          : null;
+
+        // 如果持久化的 ID 在列表中存在，使用它；否则如果 persistedId 存在
+        // 说明是新建的空会话（尚未向后端发送请求），保持该 ID 不跳走
+        const sessionId = targetSession?.id || (persistedId || data.sessions[0].id);
+
+        setActiveSessionId(sessionId);
+
+        // 仅当会话在后端列表中且消息数 > 0 时才加载消息
+        if (targetSession && targetSession.message_count > 0) {
+          getSession(sessionId)
+            .then((detail) => {
+              const loadedMessages = buildMessagesFromDetail(detail.messages);
+              sessionCache.current.set(sessionId, loadedMessages);
+              setMessages(loadedMessages);
+            })
+            .catch(() => setMessages([]));
         }
       })
       .catch(() => {
         // 后端不可用时静默处理
       });
   }, []);
+
+  // activeSessionId 变化时持久化到 sessionStorage（刷新恢复用）
+  useEffect(() => {
+    if (activeSessionId) {
+      sessionStorage.setItem("rag_active_session_id", activeSessionId);
+    }
+  }, [activeSessionId]);
 
   // 切换会话时加载消息（优先从缓存恢复）
   const handleSelectSession = useCallback(async (sessionId: string) => {
@@ -109,22 +145,11 @@ export default function App() {
     }
   }, [sessions]);  // 依赖 sessions 以获取最新的 message_count
 
-  // 新建对话
+  // 新建对话（仅切换到空白状态，不创建侧边栏条目）
   const handleNewChat = useCallback(() => {
     const newId = crypto.randomUUID();
     setActiveSessionId(newId);
     setMessages([]);
-    // 侧边栏顶部新增一个临时会话条目
-    setSessions((prev) => [
-      {
-        id: newId,
-        title: "新对话",
-        last_message: "",
-        updated_at: new Date().toISOString(),
-        message_count: 0,
-      },
-      ...prev,
-    ]);
   }, []);
 
   // 重命名会话
@@ -186,14 +211,18 @@ export default function App() {
       if (!sessionId) {
         sessionId = crypto.randomUUID();
         setActiveSessionId(sessionId);
-        // 侧边栏新增条目
+      }
+
+      // 如果当前 sessionID 不在会话列表中（新建的空会话），创建侧边栏条目
+      const isNewSession = !sessions.some((s) => s.id === sessionId);
+      if (isNewSession) {
         setSessions((prev) => [
           {
             id: sessionId!,
-            title: "新对话",
-            last_message: "",
+            title: question.slice(0, 20),
+            last_message: question,
             updated_at: new Date().toISOString(),
-            message_count: 0,
+            message_count: 1,
           },
           ...prev,
         ]);

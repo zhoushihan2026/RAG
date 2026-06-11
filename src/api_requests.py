@@ -1021,9 +1021,10 @@ class Fe8Processor:
     BASE_URL = "https://api.fe8.cn/v1"
 
     def __init__(self):
+        load_dotenv()
         self.api_key = os.getenv("FE8_API_KEY", "")
         self._client = None
-        self.default_model = "gpt-3.5-turbo"
+        self.default_model = "qwen-turbo"
         self._stream_full_content = ""
 
     def _get_client(self):
@@ -1039,7 +1040,7 @@ class Fe8Processor:
 
     def send_message(
         self,
-        model="gpt-3.5-turbo",
+        model="qwen-turbo",
         temperature=0.1,
         seed=None,
         system_content='You are a helpful assistant.',
@@ -1084,7 +1085,7 @@ class Fe8Processor:
             print(f"[fe8.cn] 调用失败: {e}")
             raise
 
-    def send_message_stream(self, model="gpt-3.5-turbo", temperature=0.1,
+    def send_message_stream(self, model="qwen-turbo", temperature=0.1,
                             system_content='You are a helpful assistant.',
                             human_content='Hello!',
                             messages=None,
@@ -1096,7 +1097,7 @@ class Fe8Processor:
         client = self._get_client()
 
         if model is None:
-            model = "gpt-3.5-turbo"
+            model = "qwen-turbo"
 
         # 如果传入 messages，直接使用；否则从 system_content + human_content 构造
         if messages is None:
